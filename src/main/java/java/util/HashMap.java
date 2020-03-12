@@ -51,7 +51,7 @@ public class HashMap<K, V> extends AbstractMap<K, V>
      */
     transient Node<K, V>[] table;
     /**
-     * 哈希表中所有元素的集合, 类型{@link EntrySet} 不同于普通Set, 这个Set并不保存任何元素的副本, 而是构造了一个迭代器{@link EntryIterator}直接迭代table中的元素
+     * 哈希表中所有元素的集合 {@link #entrySet()}
      */
     transient Set<Entry<K, V>> entrySet;
     /**
@@ -270,7 +270,7 @@ public class HashMap<K, V> extends AbstractMap<K, V>
                         return ((TreeNode<K, V>)targetNode).getTreeNode(hash, key);
                     }
                     do {
-                        // 如果该处只是链表 则遍历至找到相等的key或尾结点
+                        // 如果该处只是链表 则遍历至找到相等的key或最后一个结点
                         if (current.hash == hash &&
                             ((currentKey = current.key) == key || (key != null && key.equals(currentKey)))) {
                             return current;
@@ -301,165 +301,226 @@ public class HashMap<K, V> extends AbstractMap<K, V>
     }
 
     /**
-     * Implements Map.put and related methods.
+     * {@link #put(Object, Object)}的具体实现
      *
-     * @param hash         hash for key
-     * @param key          the key
-     * @param value        the value to put
-     * @param onlyIfAbsent if true, don't change existing value
-     * @param evict        if false, the table is in creation mode.
-     * @return previous value, or null if none
+     * @param hash         扰动后的Hash值
+     * @param key          key
+     * @param value        value
+     * @param onlyIfAbsent 如果已存在key则不操作
+     * @param evict        (容量满时)是否逐出首元素, 做缓存时使用 (初始化时应当置为false)
+     * @return 如果先前已存在该Key 则返回原来的value, 否则返回null
      */
     final V putVal(int hash, K key, V value, boolean onlyIfAbsent,
                    boolean evict) {
         Node<K, V>[] tab;
-        Node<K, V> p;
-        int n, i;
-        if ((tab = table) == null || (n = tab.length) == 0) { n = (tab = resize()).length; }
-        if ((p = tab[i = (n - 1) & hash]) == null) { tab[i] = newNode(hash, key, value, null); } else {
-            Node<K, V> e;
+        int tableLength;
+        if ((tab = table) == null || (tableLength = tab.length) == 0) {
+            // 当数组尚未初始化时, 使用resize方法初始化
+            tableLength = (tab = resize()).length;
+        }
+        int index = (tableLength - 1) & hash;
+        Node<K, V> currentNode = tab[index];
+        if (currentNode == null) {
+            // 如果该位置没有Key(没有出现Hash碰撞) 构建Node直接放上去
+            tab[index] = newNode(hash, key, value, null);
+        } else {
+            Node<K, V> oldNode;
             K k;
-            if (p.hash == hash &&
-                ((k = p.key) == key || (key != null && key.equals(k)))) { e = p; } else if (p instanceof TreeNode) {
-                e = ((TreeNode<K, V>)p).putTreeVal(this, tab, hash, key, value);
+            if (currentNode.hash == hash &&
+                ((k = currentNode.key) == key || (key != null && key.equals(k)))) {
+                // 如果找到了相同的Key的元素 统一在最后设置Value即可(不用新构建Node)
+                oldNode = currentNode;
+            } else if (currentNode instanceof TreeNode) {
+                // 如果该节点是红黑树节点(根节点), 类似getNode, 直接调用红黑树putTreeVal进行操作
+                // 同样的 如果红黑树上已经存在了该Key, 则应当返回该Node, 统一设置新Value; 如果没有该元素, 应当返回null
+                oldNode = ((TreeNode<K, V>)currentNode).putTreeVal(this, tab, hash, key, value);
             } else {
+                // 否则说明该节点是个普通的链表节点 向后遍历该链表
                 for (int binCount = 0; ; ++binCount) {
-                    if ((e = p.next) == null) {
-                        p.next = newNode(hash, key, value, null);
-                        if (binCount >= TREEIFY_THRESHOLD - 1) // -1 for 1st
-                        { treeifyBin(tab, hash); }
+                    if ((oldNode = currentNode.next) == null) {
+                        // 如果遍历至最后都没有找到相同Key的Node 则新构建Node追加到链表最后
+                        currentNode.next = newNode(hash, key, value, null);
+                        if (binCount >= TREEIFY_THRESHOLD - 1) {
+                            // 如果链表节点超过8个 则树化
+                            treeifyBin(tab, hash);
+                        }
                         break;
                     }
-                    if (e.hash == hash &&
-                        ((k = e.key) == key || (key != null && key.equals(k)))) { break; }
-                    p = e;
+                    if (oldNode.hash == hash &&
+                        ((k = oldNode.key) == key || (key != null && key.equals(k)))) {
+                        break;
+                    }
+                    // 如果在遍历过程找到了该Key 记录下它 在下面统一设置新值
+                    currentNode = oldNode;
                 }
             }
-            if (e != null) { // existing mapping for key
-                V oldValue = e.value;
-                if (!onlyIfAbsent || oldValue == null) { e.value = value; }
-                afterNodeAccess(e);
+            if (oldNode != null) {
+                V oldValue = oldNode.value;
+                if (!onlyIfAbsent || oldValue == null) {
+                    // 为已存在的Node设置新的Value
+                    oldNode.value = value;
+                }
+                // 在Node被访问后做一些事情 (做缓存时有用 , 访问后代表该数据是热点数据)
+                afterNodeAccess(oldNode);
                 return oldValue;
             }
         }
         ++modCount;
-        if (++size > threshold) { resize(); }
+        if (++size > threshold) {
+            // 容量超出了阈值(期望的容量) 扩容
+            resize();
+        }
         afterNodeInsertion(evict);
         return null;
     }
 
     /**
-     * Initializes or doubles table size.  If null, allocates in accord with initial capacity target held in field
-     * threshold. Otherwise, because we are using power-of-two expansion, the elements from each bin must either stay at
-     * same index, or move with a power of two offset in the new table.
+     * 原话翻译: 初始化或翻倍表大小, 如果为空，则根据字段阈值中保存的初始容量目标进行分配。 否则，因为我们使用的是2的幂，所以每个bin中的元素必须保持相同的索引，或者在新表中以2的幂偏移。
+     * <p>
+     * 当数组还没初始化时, 使用了threshold来临时存储表的容量. 当数组扩容时, 扩容是2倍, 那么数组容量依然是2的幂 新的索引等于 currentNode.hash & (newCapacity - 1)
      *
-     * @return the table
+     * @return 扩容后的数组
      */
     final Node<K, V>[] resize() {
-        Node<K, V>[] oldTab = table;
-        int oldCap = (oldTab == null) ? 0 : oldTab.length;
-        int oldThr = threshold;
-        int newCap, newThr = 0;
-        if (oldCap > 0) {
-            if (oldCap >= MAXIMUM_CAPACITY) {
+        Node<K, V>[] oldTable = table;
+        int oldCapacity = (oldTable == null) ? 0 : oldTable.length;
+        int oldThreshold = threshold;
+        int newCapacity, newThreshold = 0;
+        if (oldCapacity > 0) {
+            // 如果数组已经初始化过了
+            if (oldCapacity >= MAXIMUM_CAPACITY) {
                 threshold = Integer.MAX_VALUE;
-                return oldTab;
-            } else if ((newCap = oldCap << 1) < MAXIMUM_CAPACITY &&
-                oldCap >= DEFAULT_INITIAL_CAPACITY) {
-                newThr = oldThr << 1; // double threshold
+                return oldTable;
+            } else if ((newCapacity = oldCapacity << 1) < MAXIMUM_CAPACITY &&
+                oldCapacity >= DEFAULT_INITIAL_CAPACITY) {
+                // 数组容量范围 阈值翻倍
+                newThreshold = oldThreshold << 1;
             }
-        } else if (oldThr > 0) // initial capacity was placed in threshold
-        { newCap = oldThr; } else {               // zero initial threshold signifies using defaults
-            newCap = DEFAULT_INITIAL_CAPACITY;
-            newThr = (int)(DEFAULT_LOAD_FACTOR * DEFAULT_INITIAL_CAPACITY);
+        } else if (oldThreshold > 0) {
+            // 如果数组尚未初始化 且(初始化)设置了threshold(initialCapacity)
+            newCapacity = oldThreshold;
+            // 在下面newThreshold == 0中恢复threshold的真正作用
+        } else {
+            // 没有设置initialCapacity
+            newCapacity = DEFAULT_INITIAL_CAPACITY;
+            newThreshold = (int)(DEFAULT_LOAD_FACTOR * DEFAULT_INITIAL_CAPACITY);
         }
-        if (newThr == 0) {
-            float ft = (float)newCap * loadFactor;
-            newThr = (newCap < MAXIMUM_CAPACITY && ft < (float)MAXIMUM_CAPACITY ?
+        if (newThreshold == 0) {
+            // 初始化时 恢复threshold的真正作用
+            float ft = (float)newCapacity * loadFactor;
+            newThreshold = (newCapacity < MAXIMUM_CAPACITY && ft < (float)MAXIMUM_CAPACITY ?
                 (int)ft : Integer.MAX_VALUE);
         }
-        threshold = newThr;
+        threshold = newThreshold;
         @SuppressWarnings({"rawtypes", "unchecked"})
-        Node<K, V>[] newTab = (Node<K, V>[])new Node[newCap];
-        table = newTab;
-        if (oldTab != null) {
-            for (int j = 0; j < oldCap; ++j) {
-                Node<K, V> e;
-                if ((e = oldTab[j]) != null) {
-                    oldTab[j] = null;
-                    if (e.next == null) { newTab[e.hash & (newCap - 1)] = e; } else if (e instanceof TreeNode) {
-                        ((TreeNode<K, V>)e).split(this, newTab, j, oldCap);
-                    } else { // preserve order
-                        Node<K, V> loHead = null, loTail = null;
-                        Node<K, V> hiHead = null, hiTail = null;
+        Node<K, V>[] newTable = (Node<K, V>[])new Node[newCapacity];
+        // 替换原数组
+        table = newTable;
+        // 下面开始迁移
+        if (oldTable != null) {
+            for (int j = 0; j < oldCapacity; ++j) {
+                Node<K, V> currentNode;
+                if ((currentNode = oldTable[j]) != null) {
+                    oldTable[j] = null;
+                    if (currentNode.next == null) {
+                        int newIndex = currentNode.hash & (newCapacity - 1);
+                        newTable[newIndex] = currentNode;
+                    } else if (currentNode instanceof TreeNode) {
+                        // 红黑树的节点可能不再在新数组的bin上碰撞 它们可能索引不变 也可能是偏移原数组容量个位置 (扩容的那一侧)
+                        // 所以红黑树这里用了一个split函数 拆分树
+                        ((TreeNode<K, V>)currentNode).split(this, newTable, j, oldCapacity);
+                    } else {
+                        // 这里特别备注了 保留原顺序
+                        // 虽然链表会拆分 一部分留在扩容前那一侧 一部分会偏移到扩容的那一侧 但是顺序不变
+                        Node<K, V> lowHead = null, lowTail = null;
+                        Node<K, V> highHead = null, highTail = null;
                         Node<K, V> next;
                         do {
-                            next = e.next;
-                            if ((e.hash & oldCap) == 0) {
-                                if (loTail == null) { loHead = e; } else { loTail.next = e; }
-                                loTail = e;
+                            next = currentNode.next;
+                            if ((currentNode.hash & oldCapacity) == 0) {
+                                // 1101101 & 100
+                                // hash值 & 原数组容量等于0 说明这个hash值在原数组容量最高位的那个位置是0
+                                // 扩容前这个位置 & 0 = 0 扩容后 这个位置将 & 1 = 0
+                                // 所以本if块的节点不需要偏移到扩容的那一侧 称为low侧
+                                if (lowTail == null) {
+                                    // 记录当前节点 为头结点 也就是说放在数组bin中的那个节点是链表头结点
+                                    lowHead = currentNode;
+                                } else {
+                                    // 按遍历顺序(原链表的顺序)往后追加
+                                    lowTail.next = currentNode;
+                                }
+                                // 将最后一个节点标记为尾结点 尾插法
+                                lowTail = currentNode;
                             } else {
-                                if (hiTail == null) { hiHead = e; } else { hiTail.next = e; }
-                                hiTail = e;
+                                // 拆分到扩容后的那一侧的节点也是相同的操作
+                                // 头结点highHead 尾结点highTail
+                                if (highTail == null) {
+                                    highHead = currentNode;
+                                } else {
+                                    highTail.next = currentNode;
+                                }
+                                highTail = currentNode;
                             }
-                        } while ((e = next) != null);
-                        if (loTail != null) {
-                            loTail.next = null;
-                            newTab[j] = loHead;
+                        } while ((currentNode = next) != null);
+                        // 下面就更清晰了 验证上面的 (currentNode.hash & oldCapacity) == 0 的用处
+                        if (lowTail != null) {
+                            lowTail.next = null;
+                            // 扩容前的那一侧
+                            newTable[j] = lowHead;
                         }
-                        if (hiTail != null) {
-                            hiTail.next = null;
-                            newTab[j + oldCap] = hiHead;
+                        if (highTail != null) {
+                            highTail.next = null;
+                            // 扩容后(偏移)的那一侧
+                            newTable[j + oldCapacity] = highHead;
                         }
                     }
                 }
             }
         }
-        return newTab;
+        return newTable;
     }
 
     /**
-     * Replaces all linked nodes in bin at index for given hash unless table is too small, in which case resizes
-     * instead.
+     * 树化 数组的每个位置都成为bin(箱子)
      */
     final void treeifyBin(Node<K, V>[] tab, int hash) {
-        int n, index;
-        Node<K, V> e;
-        if (tab == null || (n = tab.length) < MIN_TREEIFY_CAPACITY) { resize(); } else if (
-            (e = tab[index = (n - 1) & hash]) != null) {
-            TreeNode<K, V> hd = null, tl = null;
+        int tableLength, index;
+        Node<K, V> oldNode;
+        if (tab == null || (tableLength = tab.length) < MIN_TREEIFY_CAPACITY) {
+            // 当数组容量 < 64时, 只扩容 不树化 (以此来降低碰撞概率)
+            resize();
+        } else if (
+            (oldNode = tab[index = (tableLength - 1) & hash]) != null) {
+            TreeNode<K, V> headNode = null, lastNode = null;
             do {
-                TreeNode<K, V> p = replacementTreeNode(e, null);
-                if (tl == null) { hd = p; } else {
-                    p.prev = tl;
-                    tl.next = p;
+                // 将链表中的每个链表节点替换为树节点
+                TreeNode<K, V> currentNode = replacementTreeNode(oldNode, null);
+                if (lastNode == null) {
+                    headNode = currentNode;
+                } else {
+                    currentNode.prev = lastNode;
+                    lastNode.next = currentNode;
                 }
-                tl = p;
-            } while ((e = e.next) != null);
-            if ((tab[index] = hd) != null) { hd.treeify(tab); }
+                lastNode = currentNode;
+            } while ((oldNode = oldNode.next) != null);
+            if ((tab[index] = headNode) != null) {
+                // 从根节点开始树化
+                headNode.treeify(tab);
+            }
         }
     }
 
     /**
-     * Copies all of the mappings from the specified map to this map. These mappings will replace any mappings that this
-     * map had for any of the keys currently in the specified map.
+     * 导入一个Map
      *
-     * @param m mappings to be stored in this map
-     * @throws NullPointerException if the specified map is null
+     * @param sourceMap 待导入的Map
+     * @throws NullPointerException 空指针异常
      */
     @Override
-    public void putAll(Map<? extends K, ? extends V> m) {
-        putMapEntries(m, true);
+    public void putAll(Map<? extends K, ? extends V> sourceMap) {
+        putMapEntries(sourceMap, true);
     }
 
-    /**
-     * Removes the mapping for the specified key from this map if present.
-     *
-     * @param key key whose mapping is to be removed from the map
-     * @return the previous value associated with <tt>key</tt>, or
-     * <tt>null</tt> if there was no mapping for <tt>key</tt>.
-     * (A <tt>null</tt> return can also indicate that the map previously associated <tt>null</tt> with <tt>key</tt>.)
-     */
     @Override
     public V remove(Object key) {
         Node<K, V> e;
@@ -468,55 +529,68 @@ public class HashMap<K, V> extends AbstractMap<K, V>
     }
 
     /**
-     * Implements Map.remove and related methods.
+     * {@link #remove(Object)}的具体实现
      *
-     * @param hash       hash for key
-     * @param key        the key
-     * @param value      the value to match if matchValue, else ignored
-     * @param matchValue if true only remove if value is equal
-     * @param movable    if false do not move other nodes while removing
-     * @return the node, or null if none
+     * @param hash       扰动后的Hash值
+     * @param key        key
+     * @param value      当{@param value} = true 时 要求value一致才能删除
+     * @param matchValue matchValue
+     * @param movable    设置为true 保证红黑树的根节点始终在数组bin上 (红黑树自平衡时 根节点可能会变化)
+     * @return 被删除的node ; 如果不存在该node则返回null
      */
     final Node<K, V> removeNode(int hash, Object key, Object value,
                                 boolean matchValue, boolean movable) {
         Node<K, V>[] tab;
-        Node<K, V> p;
+        Node<K, V> currentNode;
         int n, index;
         if ((tab = table) != null && (n = tab.length) > 0 &&
-            (p = tab[index = (n - 1) & hash]) != null) {
-            Node<K, V> node = null, e;
+            (currentNode = tab[index = (n - 1) & hash]) != null) {
+            // 索引处存在节点
+            Node<K, V> targetNode = null, nextNode;
             K k;
             V v;
-            if (p.hash == hash &&
-                ((k = p.key) == key || (key != null && key.equals(k)))) { node = p; } else if ((e = p.next) != null) {
-                if (p instanceof TreeNode) { node = ((TreeNode<K, V>)p).getTreeNode(hash, key); } else {
+            if (currentNode.hash == hash &&
+                ((k = currentNode.key) == key || (key != null && key.equals(k)))) {
+                // key相等 说明是期望删除的Node
+                targetNode = currentNode;
+            } else if ((nextNode = currentNode.next) != null) {
+                if (currentNode instanceof TreeNode) {
+                    // 委托给红黑树去查找节点
+                    targetNode = ((TreeNode<K, V>)currentNode).getTreeNode(hash, key);
+                } else {
+                    // 如果是普通链表节点 则遍历查找
                     do {
-                        if (e.hash == hash &&
-                            ((k = e.key) == key ||
+                        if (nextNode.hash == hash &&
+                            ((k = nextNode.key) == key ||
                                 (key != null && key.equals(k)))) {
-                            node = e;
+                            targetNode = nextNode;
                             break;
                         }
-                        p = e;
-                    } while ((e = e.next) != null);
+                        currentNode = nextNode;
+                    } while ((nextNode = nextNode.next) != null);
                 }
             }
-            if (node != null && (!matchValue || (v = node.value) == value ||
+            if (targetNode != null && (!matchValue || (v = targetNode.value) == value ||
                 (value != null && value.equals(v)))) {
-                if (node instanceof TreeNode) { ((TreeNode<K, V>)node).removeTreeNode(this, tab, movable); } else if (
-                    node == p) { tab[index] = node.next; } else { p.next = node.next; }
+                // 找到了目标节点
+                if (targetNode instanceof TreeNode) {
+                    // 红黑树节点委托给红黑树去删除
+                    ((TreeNode<K, V>)targetNode).removeTreeNode(this, tab, movable);
+                } else if (targetNode == currentNode) {
+                    // 如果targetNode == currentNode 说明是链表第一个节点; 否则currentNode应当是targetNode的下一节点
+                    tab[index] = targetNode.next;
+                } else {
+                    currentNode.next = targetNode.next;
+                }
                 ++modCount;
                 --size;
-                afterNodeRemoval(node);
-                return node;
+                afterNodeRemoval(targetNode);
+                return targetNode;
             }
         }
         return null;
     }
 
-    /**
-     * Removes all of the mappings from this map. The map will be empty after this call returns.
-     */
     @Override
     public void clear() {
         Node<K, V>[] tab;
@@ -527,13 +601,6 @@ public class HashMap<K, V> extends AbstractMap<K, V>
         }
     }
 
-    /**
-     * Returns <tt>true</tt> if this map maps one or more keys to the specified value.
-     *
-     * @param value value whose presence in this map is to be tested
-     * @return <tt>true</tt> if this map maps one or more keys to the
-     * specified value
-     */
     @Override
     public boolean containsValue(Object value) {
         Node<K, V>[] tab;
@@ -550,15 +617,7 @@ public class HashMap<K, V> extends AbstractMap<K, V>
     }
 
     /**
-     * Returns a {@link Set} view of the keys contained in this map. The set is backed by the map, so changes to the map
-     * are reflected in the set, and vice-versa.  If the map is modified while an iteration over the set is in progress
-     * (except through the iterator's own <tt>remove</tt> operation), the results of the iteration are undefined.  The
-     * set supports element removal, which removes the corresponding mapping from the map, via the
-     * <tt>Iterator.remove</tt>, <tt>Set.remove</tt>,
-     * <tt>removeAll</tt>, <tt>retainAll</tt>, and <tt>clear</tt>
-     * operations.  It does not support the <tt>add</tt> or <tt>addAll</tt> operations.
-     *
-     * @return a set view of the keys contained in this map
+     * {@link KeySet}与{@link EntrySet}类似 不存放元素 而是构造了一个迭代器直接操作本类中的元素
      */
     @Override
     public Set<K> keySet() {
@@ -571,16 +630,7 @@ public class HashMap<K, V> extends AbstractMap<K, V>
     }
 
     /**
-     * Returns a {@link Collection} view of the values contained in this map. The collection is backed by the map, so
-     * changes to the map are reflected in the collection, and vice-versa.  If the map is modified while an iteration
-     * over the collection is in progress (except through the iterator's own <tt>remove</tt> operation), the results of
-     * the iteration are undefined.  The collection supports element removal, which removes the corresponding mapping
-     * from the map, via the <tt>Iterator.remove</tt>,
-     * <tt>Collection.remove</tt>, <tt>removeAll</tt>,
-     * <tt>retainAll</tt> and <tt>clear</tt> operations.  It does not
-     * support the <tt>add</tt> or <tt>addAll</tt> operations.
-     *
-     * @return a view of the values contained in this map
+     * {@link Values}与{@link EntrySet}类似 不存放元素 而是构造了一个迭代器直接操作本类中的元素
      */
     @Override
     public Collection<V> values() {
@@ -593,17 +643,7 @@ public class HashMap<K, V> extends AbstractMap<K, V>
     }
 
     /**
-     * Returns a {@link Set} view of the mappings contained in this map. The set is backed by the map, so changes to the
-     * map are reflected in the set, and vice-versa.  If the map is modified while an iteration over the set is in
-     * progress (except through the iterator's own <tt>remove</tt> operation, or through the
-     * <tt>setValue</tt> operation on a map entry returned by the
-     * iterator) the results of the iteration are undefined.  The set supports element removal, which removes the
-     * corresponding mapping from the map, via the <tt>Iterator.remove</tt>,
-     * <tt>Set.remove</tt>, <tt>removeAll</tt>, <tt>retainAll</tt> and
-     * <tt>clear</tt> operations.  It does not support the
-     * <tt>add</tt> or <tt>addAll</tt> operations.
-     *
-     * @return a set view of the mappings contained in this map
+     * 类型{@link EntrySet} 不同于普通Set, 这个Set并不保存任何元素的副本, 而是构造了一个迭代器{@link EntryIterator}直接操作本类中的元素
      */
     @Override
     public Set<Entry<K, V>> entrySet() {
@@ -1306,8 +1346,10 @@ public class HashMap<K, V> extends AbstractMap<K, V>
     }
 
     /**
-     * Entry for Tree bins. Extends LinkedHashMap.Entry (which in turn extends Node) so can be used as extension of
-     * either regular or linked node.
+     * 红黑树节点
+     *
+     * @param <K> key类型
+     * @param <V> value类型
      */
     static final class TreeNode<K, V> extends HashMapAddition.Entry<K, V> {
         TreeNode<K, V> parent;  // red-black tree links
@@ -1741,45 +1783,61 @@ public class HashMap<K, V> extends AbstractMap<K, V>
         }
 
         /**
-         * Splits nodes in a tree bin into lower and upper tree bins, or untreeifies if now too small. Called only from
-         * resize; see above discussion about split bits and indices.
+         *
+         * 将树箱中的节点拆分为较高和较低的树箱，如果拆分后的树太小，则取消树化
          *
          * @param map   the map
-         * @param tab   the table for recording bin heads
-         * @param index the index of the table being split
-         * @param bit   the bit of hash to split on
+         * @param newTable   新数组
+         * @param index 需要拆分的树(本节点)在原数组中的位置
+         * @param oldTableCapacity   原数组大小
          */
-        final void split(HashMap<K, V> map, Node<K, V>[] tab, int index, int bit) {
-            TreeNode<K, V> b = this;
-            // Relink into lo and hi lists, preserving order
-            TreeNode<K, V> loHead = null, loTail = null;
-            TreeNode<K, V> hiHead = null, hiTail = null;
+        final void split(HashMap<K, V> map, Node<K, V>[] newTable, int index, int oldTableCapacity) {
+            TreeNode<K, V> thisNode = this;
+            // 先当成链表拆分 并且也会保留顺序
+            TreeNode<K, V> lowHead = null, lowTail = null;
+            TreeNode<K, V> highHead = null, highTail = null;
             int lc = 0, hc = 0;
-            for (TreeNode<K, V> e = b, next; e != null; e = next) {
-                next = (TreeNode<K, V>)e.next;
-                e.next = null;
-                if ((e.hash & bit) == 0) {
-                    if ((e.prev = loTail) == null) { loHead = e; } else { loTail.next = e; }
-                    loTail = e;
+            for (TreeNode<K, V> currentNode = thisNode, next; currentNode != null; currentNode = next) {
+                next = (TreeNode<K, V>)currentNode.next;
+                currentNode.next = null;
+                if ((currentNode.hash & oldTableCapacity) == 0) {
+                    if ((currentNode.prev = lowTail) == null) {
+                        lowHead = currentNode;
+                    } else {
+                        lowTail.next = currentNode;
+                    }
+                    lowTail = currentNode;
                     ++lc;
                 } else {
-                    if ((e.prev = hiTail) == null) { hiHead = e; } else { hiTail.next = e; }
-                    hiTail = e;
+                    if ((currentNode.prev = highTail) == null) { highHead = currentNode; } else { highTail.next = currentNode; }
+                    highTail = currentNode;
                     ++hc;
                 }
             }
 
-            if (loHead != null) {
-                if (lc <= UNTREEIFY_THRESHOLD) { tab[index] = loHead.untreeify(map); } else {
-                    tab[index] = loHead;
-                    if (hiHead != null) // (else is already treeified)
-                    { loHead.treeify(tab); }
+            if (lowHead != null) {
+                if (lc <= UNTREEIFY_THRESHOLD) {
+                    // 节点数不足6个 反树化
+                    // 过程十分简单 因为所有的树节点本身也符合链表节点的特性 所以只需将TreeNode类型转变成怕普通Node即可
+                    newTable[index] = lowHead.untreeify(map);
+                } else {
+                    newTable[index] = lowHead;
+                    if (highHead != null) {
+                        // 从链表头部重新建树
+                        lowHead.treeify(newTable);
+                    }
+                    // 如果 highHead==null 说明没有拆分 不用建树
                 }
             }
-            if (hiHead != null) {
-                if (hc <= UNTREEIFY_THRESHOLD) { tab[index + bit] = hiHead.untreeify(map); } else {
-                    tab[index + bit] = hiHead;
-                    if (loHead != null) { hiHead.treeify(tab); }
+            // 扩容的那一侧的树也是一样的操作
+            if (highHead != null) {
+                if (hc <= UNTREEIFY_THRESHOLD) {
+                    newTable[index + oldTableCapacity] = highHead.untreeify(map);
+                } else {
+                    newTable[index + oldTableCapacity] = highHead;
+                    if (lowHead != null) {
+                        highHead.treeify(newTable);
+                    }
                 }
             }
         }
